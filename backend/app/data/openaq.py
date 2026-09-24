@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import email.utils
 import math
 import time
 from datetime import datetime, timedelta, timezone
@@ -21,12 +22,33 @@ class DataUnavailable(RuntimeError):
     pass
 
 
+def _retry_delay(response: httpx.Response, attempt: int) -> float:
+    """Return a bounded retry delay, preferring the provider's Retry-After header."""
+    retry_after = response.headers.get("Retry-After")
+
+    if retry_after:
+        try:
+            return max(0.0, min(float(retry_after), 30.0))
+        except ValueError:
+            try:
+                retry_at = email.utils.parsedate_to_datetime(retry_after)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                delay = (retry_at - datetime.now(timezone.utc)).total_seconds()
+                return max(0.0, min(delay, 30.0))
+            except (TypeError, ValueError, OverflowError):
+                pass
+
+    return min(0.5 * (attempt + 1), 5.0)
+
+
 def request(client, url, **kwargs):
     host = httpx.URL(url).host
     provider = "OpenAQ" if host == "api.openaq.org" else "Weather provider"
     retries = getattr(get_settings(), "provider_retries", 1)
     for attempt in range(retries + 1):
         retry = False
+        retry_delay = None
         try:
             response = client.get(url, **kwargs)
             response.raise_for_status()
@@ -41,7 +63,9 @@ def request(client, url, **kwargs):
                 403: f"{provider} denied access. Check account permissions or contact the provider.",
                 429: f"{provider} rate limit reached. Wait for the quota window to reset before retrying.",
             }.get(code, f"{provider} returned HTTP {code}.")
-            retry = code in (502, 503, 504)
+            retry = code in (429, 502, 503, 504)
+            if code == 429:
+                retry_delay = _retry_delay(exc.response, attempt)
         except httpx.ConnectTimeout:
             detail = f"{provider} connection timed out before an HTTP response. Check network access to {host}:443; this does not establish whether the key is valid."
             retry = True
@@ -62,7 +86,9 @@ def request(client, url, **kwargs):
             detail = f"{provider} returned an invalid JSON response."
         if not retry or attempt == retries:
             raise DataUnavailable(detail) from None
-        time.sleep(0.5 * (attempt + 1))
+        if retry_delay is None:
+            retry_delay = min(0.5 * (attempt + 1), 5.0)
+        time.sleep(retry_delay)
 
 
 def provider_timeout():
