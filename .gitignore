@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Models & generated data (keep sample CSVs)
+*.joblib
+*.pkl
+data/processed/
+data/raw/
+data/sample/*.csv
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.log
+tmp/
+npm-debug.log*
+
+# Env & secrets
+.env
+.env.local
+.env.*.local
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Notebooks
+.ipynb_checkpoints/
