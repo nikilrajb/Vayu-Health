@@ -1,5 +1,10 @@
 # Vayu Health
 
+Live coverage now includes **42 Indian cities**, independent pollutant forecasting,
+and explicitly labelled CAMS regional estimates when station coverage is missing.
+See [the forecasting and response design](docs/RESILIENT_FORECASTING.md) for what
+is implemented, evaluation methods, and the field validation still required.
+
 **New here? Read [RUN_GUIDE.md](RUN_GUIDE.md)** for installation, live editing, local execution, testing, and OpenAQ timeout troubleshooting. Run `./diagnose.ps1` for a safe provider connectivity report.
 
 Air-quality intelligence for earlier action. Implements the core dashboard described in **VAYU.pdf / PS-1A**: PM2.5 and PM10 forecasts, public-health outlooks, station mapping, explainability, and human-reviewed industrial recommendations.
@@ -44,7 +49,7 @@ Available cities: Delhi, Mumbai, Los Angeles, London, Beijing. Live coverage dep
 
 ## Data pipeline
 
-1. Discover OpenAQ v3 stations within the API's maximum **25 km** search radius.
+1. Discover stations within **125 km** using OpenAQ's bounding-box query followed by a circular distance filter (the API's direct radius parameter is capped at 25 km).
 2. Resolve each latest reading's `sensorsId` through station sensor metadata. Accept PM2.5/PM10 concentration units only, reject negative/non-finite values, preserve timestamps, and exclude readings older than 24 hours.
 3. Select one station with both pollutants, then paginate up to 45 days of `/sensors/{id}/hours`. Require at least 75% coverage for an hourly aggregate when coverage metadata exists. Duplicate hourly timestamps are averaged.
 4. Join to hourly Open-Meteo weather in UTC. Older weather is reanalysis; recent weather comes from the forecast API's past window. The OpenAQ key is **never** sent to the weather provider.

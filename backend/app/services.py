@@ -1,21 +1,42 @@
 from datetime import timedelta
+from threading import Lock
+import time
 import pandas as pd
 from app.alerts import build_alerts
 from app.aqi import aqi_from_pm
 from app.catalog import CITIES, get_location
-from app.data.openaq import collect
+from app.data.openaq import collect, DataUnavailable
+from app.data.resilient import resilient_dataset
 from app.data.synthetic import extend_to_now, load_city_series
 from app.ml.model import forecast_model
 
+_resilient_cache = {}
+_resilient_lock = Lock()
+
 
 def list_locations():
-    return list(CITIES.values())
+    return sorted(CITIES.values(), key=lambda c: (c.country != "IN", c.city))
 
 
 def dataset(city_id, mode="live"):
     location = get_location(city_id)
     if mode == "live":
-        return collect(location)
+        with _resilient_lock:
+            cached = _resilient_cache.get(city_id)
+            if cached and time.monotonic() - cached[0] < 600:
+                return cached[1]
+            try:
+                result = collect(location)
+                origin = pd.Timestamp(result["frame"].dropna().iloc[-1].timestamp)
+                if origin < pd.Timestamp.now(tz="UTC").floor("h"):
+                    raise DataUnavailable(
+                        "The paired station's last complete hour is in the past. A current-origin forecast is required for the next 24 hours.",
+                        stations=result["stations"],
+                    )
+            except DataUnavailable as exc:
+                result = resilient_dataset(location, exc)
+            _resilient_cache[city_id] = (time.monotonic(), result)
+            return result
     frame = extend_to_now(load_city_series(location.id), location.id)
     return {
         "frame": frame,
@@ -35,7 +56,7 @@ def city_snapshot(city_id, mode="live"):
     location = get_location(city_id)
     ds = dataset(city_id, mode)
     frame = ds["frame"]
-    prediction = forecast_model(location.id, frame, mode)
+    prediction = ds.get("prediction") or forecast_model(location.id, frame, mode)
     last = frame.dropna().iloc[-1]
     now = pd.Timestamp(last.timestamp).to_pydatetime()
     forecast = []
@@ -82,11 +103,24 @@ def city_snapshot(city_id, mode="live"):
             "compliance_priority": priority,
             "window_hours": peak["horizon_h"],
         }
-        for i, zone in enumerate(location.industrial_zones)
+        for i, zone in enumerate(location.industrial_zones or ["City operations review — site verification required"])
     ]
-    recent = frame.tail(72).copy().replace({float("nan"): None})
+    recent = ds.get("observed_history", frame).tail(72).copy().replace({float("nan"): None})
+    alerts = build_alerts(location, now, forecast)
+    if ds.get("quality"):
+        for alert in alerts:
+            alert.title = "Provisional outlook: " + alert.title
+            alert.message = "Includes regional model or independent station forecasts; local validation is incomplete. " + alert.message
     return {
         "location": location,
+        "quality": ds.get("quality", "station" if mode == "live" else "demo"),
+        "provenance": ds.get("provenance"),
+        "response_plan": [
+            {"step": "Verify the evidence", "detail": "Confirm a local PM10 measurement before interpreting the PM2.5/PM10 difference. Never infer dust or combustion from mismatched stations or times." if ds.get("quality") else "Check station freshness and compare with a second local monitor before escalation."},
+            {"step": "Prepare before the peak", "detail": f"Peak screening index {peak['aqi']} is forecast in {peak['horizon_h']} hours. Review the hourly window, notify the responsible operator manually, and check local official advisories."},
+            {"step": "Inspect before choosing controls", "detail": "Check material handling, dust suppression and combustion-control maintenance. These are inspection priorities, not proof that a particular facility caused the reading."},
+            {"step": "Measure the outcome", "detail": "Log the action time and collect co-located PM2.5/PM10 before and after it, alongside wind. Compare against an untreated reference monitor; do not attribute a weather-driven drop to the intervention."},
+        ],
         "observed_at": now,
         "pm25": round(float(last.pm25), 1),
         "pm10": round(float(last.pm10), 1),
@@ -111,7 +145,7 @@ def city_snapshot(city_id, mode="live"):
         "stations": ds["stations"],
         "station": ds["station"],
         "forecast": forecast,
-        "alerts": build_alerts(location, now, forecast),
+        "alerts": alerts,
         "interventions": interventions,
         "history": recent.to_dict(orient="records"),
         "model": {
@@ -124,4 +158,5 @@ def city_snapshot(city_id, mode="live"):
 
 
 def history(city_id, hours=72, mode="live"):
-    return dataset(city_id, mode)["frame"].tail(hours)
+    ds = dataset(city_id, mode)
+    return ds.get("observed_history", ds["frame"]).tail(hours)

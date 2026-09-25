@@ -13,6 +13,12 @@ import {
 import { fetchForecast, fetchLocations } from "./api";
 import type { Location, Snapshot } from "./types";
 import StationMap from "./StationMap";
+import Operations from "./Operations";
+import Planner from "./Planner";
+import Outcomes from "./Outcomes";
+import Account from "./Account";
+import Collections from "./Collections";
+import DemoWorkflow from "./DemoWorkflow";
 
 type Page =
   | "Overview"
@@ -80,6 +86,8 @@ function downloadCSV(data: Snapshot) {
       "city",
       "mode",
       "source",
+      "pm25_forecast_method",
+      "pm10_forecast_method",
       "pm25_ug_m3",
       "pm10_ug_m3",
       "hourly_risk_index",
@@ -93,6 +101,8 @@ function downloadCSV(data: Snapshot) {
       data.location.city,
       data.mode,
       data.data_source,
+      data.provenance?.pm25.forecast_method || data.model.method,
+      data.provenance?.pm10.forecast_method || data.model.method,
       r.pm25,
       r.pm10,
       r.aqi,
@@ -126,6 +136,10 @@ export default function App() {
   const [mode, setMode] = useState<"live" | "demo">("live");
   const [data, setData] = useState<Snapshot | null>(null);
   const [error, setError] = useState("");
+  const [partialStations, setPartialStations] = useState<Snapshot["stations"]>(
+    [],
+  );
+  const [connected, setConnected] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refresh, setRefresh] = useState(0);
   const [pollutant, setPollutant] = useState<"pm25" | "pm10">("pm25");
@@ -147,10 +161,16 @@ export default function App() {
     const controller = new AbortController();
     setLoading(true);
     setError("");
+    setPartialStations([]);
+    setConnected(false);
     setData(null);
     fetchForecast(city, mode, controller.signal)
       .then(setData)
       .catch((e) => {
+        if (e.name !== "AbortError") {
+          setPartialStations(e.stations || []);
+          setConnected(Boolean(e.connected));
+        }
         if (e.name !== "AbortError")
           setError(
             e.message ||
@@ -185,13 +205,13 @@ export default function App() {
     range === "forecast"
       ? data?.forecast.map((r) => ({
           ...r,
-          time: hour(r.timestamp),
+          time: new Date(r.timestamp).getTime(),
           band:
-            r[`${pollutant}_lower`] !== null
+            typeof r[`${pollutant}_lower`] === "number" && typeof r[`${pollutant}_upper`] === "number"
               ? [r[`${pollutant}_lower`], r[`${pollutant}_upper`]]
               : undefined,
         })) || []
-      : data?.history.map((r) => ({ ...r, time: hour(r.timestamp) })) || [];
+      : data?.history.map((r) => ({ ...r, time: new Date(r.timestamp).getTime() })) || [];
   const scenario =
     data?.forecast.map((r) => ({
       time: hour(r.timestamp),
@@ -239,10 +259,12 @@ export default function App() {
           <option value="history">72h history</option>
         </select>
       </div>
+      <p className="muted">{range === "forecast" ? `Method: ${data?.provenance?.[pollutant]?.forecast_method || data?.model.method}. A flat persistence forecast holds the latest measured concentration constant; it does not predict hourly changes.` : "Measured observations only. No history means the provider did not supply usable measurements."}</p>
       <div className="chart">
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart
-            data={chart}
+            key={`${city}-${range}-${pollutant}`}
+            data={[...chart].sort((a,b)=>a.time-b.time)}
             margin={{ top: 10, right: 15, left: -22, bottom: 5 }}
           >
             <defs>
@@ -258,6 +280,9 @@ export default function App() {
             />
             <XAxis
               dataKey="time"
+              type="number"
+              domain={["dataMin", "dataMax"]}
+              tickFormatter={(value) => date(new Date(value).toISOString())}
               minTickGap={45}
               tickLine={false}
               axisLine={false}
@@ -269,17 +294,21 @@ export default function App() {
               tick={{ fontSize: 11, fill: "#546b41" }}
             />
             <Tooltip
+              labelFormatter={(value) => date(new Date(Number(value)).toISOString())}
+              formatter={(value, name) => [Array.isArray(value) ? `${value.join(" – ")} µg/m³` : `${value} µg/m³`, name]}
               contentStyle={{ borderRadius: 0, border: "1px solid #191b17" }}
             />
             <Area
               dataKey="band"
+              isAnimationActive={false}
               name="Calibration band"
               stroke="none"
               fill="#99ad7a"
               fillOpacity={0.27}
             />
             <Area
-              type="monotone"
+              type="linear"
+              isAnimationActive={false}
               dataKey={pollutant}
               name={pollutant === "pm25" ? "PM2.5" : "PM10"}
               stroke="#546b41"
@@ -297,7 +326,7 @@ export default function App() {
         <span>
           {range === "forecast"
             ? "Shaded range: calibration error band, when available"
-            : "Gaps indicate missing observations"}
+            : data?.history.length ? "Gaps indicate missing observations" : "No measured history available; model output is not shown as observations"}
         </span>
       </div>
     </article>
@@ -334,8 +363,7 @@ export default function App() {
         </div>
       ) : (
         <p className="muted">
-          Persistence repeats the latest concentration. No trained-model feature
-          importance is available.
+          {data?.provenance ? "Independent forecasts use the selected pollutant's history; regional forecasts use CAMS atmospheric modelling. Feature attribution is not available for this combined outlook." : "Persistence repeats the latest concentration. No trained-model feature importance is available."}
         </p>
       )}
       <p className="fine-print">
@@ -395,7 +423,7 @@ export default function App() {
         <span>
           {data.mode === "demo"
             ? "City centre only · no fabricated stations"
-            : `OpenAQ stations within 25 km · ${data.stations.filter((s) => Object.keys(s.readings).length).length} with recent PM readings`}
+            : `OpenAQ stations within 125 km · ${data.stations.filter((s) => Object.keys(s.readings).length).length} with recent PM readings · regional context, not city-wide exposure`}
         </span>
       </div>
     </article>
@@ -534,7 +562,7 @@ export default function App() {
               {mode === "demo"
                 ? "Demo environment"
                 : data
-                  ? "OpenAQ connected"
+                  ? data.provenance ? "Sources labelled below" : "OpenAQ connected"
                   : "Live environment"}
             </span>
             <span className="avatar">VH</span>
@@ -618,7 +646,8 @@ export default function App() {
             <div className="toolbar-meta">
               {data && (
                 <span>
-                  Observed {date(data.observed_at)} · {data.location.timezone}
+                  {data.provenance ? "Forecast origin" : "Observed"}{" "}
+                  {date(data.observed_at)} · {data.location.timezone}
                 </span>
               )}
               <button
@@ -645,14 +674,18 @@ export default function App() {
               <span className="empty-icon">
                 <Icon name="database" size={32} />
               </span>
-              <h2>Data connection needs attention</h2>
+              <h2>
+                {connected
+                  ? "Live observations · forecast unavailable"
+                  : "Data connection needs attention"}
+              </h2>
               <p>{error}</p>
               <div>
                 <button
                   className="button primary"
                   onClick={() => setRefresh((v) => v + 1)}
                 >
-                  Retry connection
+                  {connected ? "Refresh observations" : "Retry connection"}
                 </button>
                 {mode === "live" && (
                   <button className="button" onClick={() => setMode("demo")}>
@@ -663,6 +696,42 @@ export default function App() {
               <p className="fine-print">
                 Live data is never silently replaced with synthetic readings.
               </p>
+            </section>
+          )}
+          {connected && partialStations.length > 0 && (
+            <section
+              className="panel"
+              style={{ padding: 24, marginBottom: 24 }}
+            >
+              <h2>Latest available OpenAQ measurements</h2>
+              <p>
+                Individual monitoring stations, not city averages. Only readings
+                from the last 24 hours are shown. Model training requires
+                aligned history for both pollutants.
+              </p>
+              {partialStations
+                .filter((s) => Object.keys(s.readings).length > 0)
+                .map((s) => (
+                  <article
+                    key={s.id}
+                    className="panel"
+                    style={{ padding: 20, marginTop: 16 }}
+                  >
+                    <h3>{s.name}</h3>
+                    <p>{s.provider}</p>
+                    {(["pm25", "pm10"] as const).map((p) => (
+                      <p key={p}>
+                        <strong>{p === "pm25" ? "PM2.5" : "PM10"}: </strong>
+                        {s.readings[p]
+                          ? `${s.readings[p].value} µg/m³ · ${date(s.readings[p].observed_at)}`
+                          : "No current measurement"}
+                      </p>
+                    ))}
+                  </article>
+                ))}
+              {!partialStations.some(
+                (s) => Object.keys(s.readings).length > 0,
+              ) && <p>No current measurements in the checked stations.</p>}
             </section>
           )}
           {loading && (
@@ -684,8 +753,70 @@ export default function App() {
               </div>
             </section>
           )}
+          {page === "Action planner" && <>{mode === "live" && <><Collections /><Account /></>}<Planner key={`${city}-${mode}`} city={city} mode={mode}/>{mode === "demo" ? <DemoWorkflow key={city}/> : <><Operations city={city}/><Outcomes city={city}/></>}</>}
           {data && !loading && (
             <>
+              {(data.station?.distance_km || 0) > 25 && <div className="notice"><span>Regional station: {data.station?.name}, {data.station?.distance_km} km from the selected city centre. This is not a city-wide measurement.</span></div>}
+              {data.provenance && (
+                <section
+                  className="panel"
+                  style={{ padding: 24, marginBottom: 24 }}
+                >
+                  <span className="eyebrow">
+                    {data.quality === "regional_model"
+                      ? "REGIONAL MODEL OUTLOOK"
+                      : "OBSERVATIONS + INDEPENDENT FORECASTS"}
+                  </span>
+                  <h2>Coverage gaps do not stop the outlook</h2>
+                  <p>
+                    Measured and modelled values are distinguished below.
+                    Forecasts are provisional; regional estimates cannot resolve
+                    street-level exposure or identify an industrial source.
+                  </p>
+                  {(["pm25", "pm10"] as const).map((p) => {
+                    const source = data.provenance![p];
+                    return (
+                      <div
+                        key={p}
+                        style={{ borderTop: "1px solid", padding: "12px 0" }}
+                      >
+                        <strong>
+                          {p === "pm25" ? "PM2.5" : "PM10"} ·{" "}
+                          {source.current_kind}
+                        </strong>
+                        <p>
+                          {source.station || source.current_source} ·{" "}
+                          {date(source.current_at)}
+                          {source.distance_km != null && ` · ${source.distance_km} km from city centre`}
+                        </p>
+                        <p>24-hour method: {source.forecast_method}</p>
+                        {source.metrics && (
+                          <p>
+                            Untouched test MAE: tree {source.metrics.model.mae},
+                            persistence {source.metrics.persistence.mae} µg/m³.{" "}
+                            {source.metrics.train_rows} training /{" "}
+                            {source.metrics.calibration_rows} calibration /{" "}
+                            {source.metrics.test_rows} test origins;{" "}
+                            {source.metrics.purge_hours}-hour gaps.
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })}
+                  <p className="fine-print">
+                    Regional data:{" "}
+                    <a
+                      href="https://open-meteo.com/en/docs/air-quality-api"
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      CAMS Global / Open-Meteo
+                    </a>{" "}
+                    · approximately 45 km grid in India. No local accuracy or
+                    calibrated uncertainty is claimed for CAMS.
+                  </p>
+                </section>
+              )}
               {data.mode === "live" &&
                 Date.now() - new Date(data.observed_at).getTime() >
                   3 * 3600000 && (
@@ -706,7 +837,9 @@ export default function App() {
                         <span>
                           <i className="dot" />
                           {data.mode === "live"
-                            ? "LATEST COMPLETE HOUR"
+                            ? data.provenance
+                              ? "PROVISIONAL SCREENING"
+                              : "LATEST COMPLETE HOUR"
                             : "DEMONSTRATION READING"}
                         </span>
                         <Icon name="wind" size={25} />
@@ -738,6 +871,9 @@ export default function App() {
                         <Icon name="layers" />
                       </span>
                       <p>Fine particles</p>
+                      {data.provenance && (
+                        <small>{data.provenance.pm25.current_kind}</small>
+                      )}
                       <div className="metric-value">
                         {data.pm25}
                         <small>µg/m³</small>
@@ -761,7 +897,10 @@ export default function App() {
                       <span className="metric-icon blue">
                         <Icon name="wind" />
                       </span>
-                      <p>Coarse particles</p>
+                      <p>Particles up to 10 µm</p>
+                      {data.provenance && (
+                        <small>{data.provenance.pm10.current_kind}</small>
+                      )}
                       <div className="metric-value">
                         {data.pm10}
                         <small>µg/m³</small>
@@ -894,8 +1033,9 @@ export default function App() {
                       )}
                       <p className="fine-print">
                         Forecast origin: {date(data.observed_at)}. Predictions
-                        are anchored to the latest complete observation, not the
-                        time this page was opened.
+                        use this origin; individual measurement times and
+                        regional estimates are identified in the source
+                        information.
                       </p>
                     </article>
                     {modelCard}
@@ -952,7 +1092,7 @@ export default function App() {
                       <div>
                         <h2>Station observations</h2>
                         <p className="muted">
-                          Recent measurements within 25 km. A hotspot is a
+                          Recent measurements within 125 km. A hotspot is a
                           relative observation, not evidence of an emission
                           source.
                         </p>
@@ -967,8 +1107,7 @@ export default function App() {
                     </div>
                     {!data.stations.length ? (
                       <div className="inline-empty">
-                        No real monitoring stations are included in demo mode.
-                        Connect live data to explore the network.
+                        {data.mode === "demo" ? "No real monitoring stations are included in demo mode." : "No station metadata is available for this request. The regional outlook is shown separately from station measurements."}
                       </div>
                     ) : (
                       <div className="table-scroll">
@@ -997,7 +1136,7 @@ export default function App() {
                                         Forecast station
                                       </span>
                                     )}
-                                    <small>{s.provider}</small>
+                                    <small>{s.provider}{s.distance_km != null && ` · ${s.distance_km} km from city centre`}</small>
                                   </td>
                                   <td>
                                     {s.readings.pm25?.value.toFixed(1) ??
@@ -1069,6 +1208,22 @@ export default function App() {
               )}
               {page === "Action planner" && (
                 <>
+                  
+                  <article
+                    className="panel"
+                    style={{ padding: 24, marginBottom: 24 }}
+                  >
+                    <span className="eyebrow">OPERATOR RESPONSE WORKFLOW</span>
+                    <h2>Verify, prepare, act, measure</h2>
+                    {data.response_plan?.map((item, i) => (
+                      <div key={item.step}>
+                        <h3>
+                          {i + 1}. {item.step}
+                        </h3>
+                        <p>{item.detail}</p>
+                      </div>
+                    ))}
+                  </article>
                   {actionsPanel}
                   <article className="panel">
                     <div className="panel-head">
@@ -1170,7 +1325,10 @@ export default function App() {
                         <div>
                           <dt>Forecast station</dt>
                           <dd>
-                            {data.station?.name || "Synthetic city series"}
+                            {data.station?.name ||
+                              (data.provenance
+                                ? "Per-pollutant sources shown above"
+                                : "Synthetic city series")}
                           </dd>
                         </div>
                         <div>
@@ -1275,8 +1433,8 @@ export default function App() {
                     ) : (
                       <p className="inline-empty">
                         Insufficient continuous history to train and evaluate
-                        the tree model. Persistence is active; no accuracy
-                        claims are available.
+                        the paired tree model. See per-pollutant methods above;
+                        no paired accuracy claims are available.
                       </p>
                     )}
                   </article>

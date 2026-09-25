@@ -1,0 +1,11 @@
+{
+ "example_only": true,
+ "budget": 15000,
+ "cost_unit": "INR per 24-hour scenario",
+ "warning": "Illustrative costs and concentration effects; not validated industrial controls.",
+ "options": [
+  {"name":"Example: inspect and repair material enclosure","cost":9000,"pm25_reduction_pct":5,"pm10_reduction_pct":15,"start_hour":4,"end_hour":24},
+  {"name":"Example: reschedule approved dusty handling","cost":7000,"pm25_reduction_pct":3,"pm10_reduction_pct":12,"start_hour":7,"end_hour":14},
+  {"name":"Example: inspect combustion control equipment","cost":12000,"pm25_reduction_pct":12,"pm10_reduction_pct":4,"start_hour":8,"end_hour":24}
+ ]
+}

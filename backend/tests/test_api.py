@@ -11,6 +11,24 @@ def test_health() -> None:
     assert resp.json()["status"] == "ok"
 
 
+def test_live_partial_observations_survive_unavailable_forecast(monkeypatch):
+    from app.data.openaq import DataUnavailable
+
+    stations = [{"id": 1, "readings": {"pm25": {"value": 38.6}}}]
+
+    def unavailable(*args):
+        raise DataUnavailable("Paired forecast unavailable", stations=stations)
+
+    monkeypatch.setattr("app.api.city_snapshot", unavailable)
+    response = TestClient(app).get("/api/v1/forecast/delhi?mode=live")
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "message": "Paired forecast unavailable",
+        "stations": stations,
+        "connected": True,
+    }
+
+
 def test_locations() -> None:
     client = TestClient(app)
     resp = client.get("/api/v1/locations")

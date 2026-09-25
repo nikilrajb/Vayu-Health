@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from numbers import Real
 import time
 from datetime import datetime, timedelta, timezone
 from threading import Lock
@@ -13,21 +14,61 @@ import pandas as pd
 from app.config import get_settings
 
 BASE = "https://api.openaq.org/v3"
+SEARCH_RADIUS_KM = 125
 _cache: dict = {}
 _lock = Lock()
 
 
 class DataUnavailable(RuntimeError):
-    pass
+    def __init__(self, message, stations=None):
+        super().__init__(message)
+        self.stations = stations
+
+
+def distance_km(lat1, lon1, lat2, lon2):
+    a, b = math.radians(lat1), math.radians(lat2)
+    dlat, dlon = b-a, math.radians(lon2-lon1)
+    h = math.sin(dlat/2)**2 + math.cos(a)*math.cos(b)*math.sin(dlon/2)**2
+    return 6371.0088 * 2 * math.asin(math.sqrt(min(1, max(0, h))))
+
+
+def discover_locations(client, location):
+    # OpenAQ caps its radius parameter at 25 km. Use its supported bbox query
+    # then apply an exact spherical distance filter to obtain a 125 km circle.
+    angular = SEARCH_RADIUS_KM / 6371.0088
+    lat_delta = math.degrees(angular)
+    lon_delta = math.degrees(math.asin(min(1, math.sin(angular)/math.cos(math.radians(location.latitude)))))
+    bounds = [location.longitude-lon_delta, location.latitude-lat_delta,
+              location.longitude+lon_delta, location.latitude+lat_delta]
+    # Round outward to the API's four-decimal precision.
+    bounds = [math.floor(v*10000)/10000 if i<2 else math.ceil(v*10000)/10000 for i,v in enumerate(bounds)]
+    rows = {}
+    for page in range(1, 6):
+        payload = request(client, f"{BASE}/locations", params={
+            "bbox": ",".join(f"{v:.4f}" for v in bounds), "limit": 1000, "page": page})
+        batch = payload.get("results") or []
+        for loc in batch:
+            coords = loc.get("coordinates") or {}
+            if coords.get("latitude") is None or coords.get("longitude") is None:
+                continue
+            distance = distance_km(location.latitude, location.longitude, coords["latitude"], coords["longitude"])
+            if distance <= SEARCH_RADIUS_KM:
+                rows[loc["id"]] = {**loc, "distance_km": round(distance, 1)}
+        if len(batch) < 1000:
+            return list(rows.values())
+    raise DataUnavailable("Station discovery exceeded its 5,000-location budget. Narrow the search before retrying.")
 
 
 def request(client, url, **kwargs):
     host = httpx.URL(url).host
-    provider = "OpenAQ" if host == "api.openaq.org" else "Weather provider"
+    provider = "OpenAQ" if host == "api.openaq.org" else "CAMS air-quality provider" if host == "air-quality-api.open-meteo.com" else "Weather provider"
     retries = getattr(get_settings(), "provider_retries", 1)
     for attempt in range(retries + 1):
         retry = False
         try:
+            if host == "api.openaq.org":
+                from app.data.quota import pace_openaq
+                pace_openaq()
             response = client.get(url, **kwargs)
             response.raise_for_status()
             payload = response.json()
@@ -82,7 +123,7 @@ def parameter(sensor):
 
 def valid_value(value):
     return (
-        isinstance(value, (int, float))
+        isinstance(value, Real)
         and not isinstance(value, bool)
         and math.isfinite(value)
         and value >= 0
@@ -167,7 +208,7 @@ def weather(client, location, start, end):
 
 
 def collect(location):
-    key = get_settings().openaq_api_key
+    key = get_settings().openaq_api_key.strip()
     if not key or key.startswith("YOUR_"):
         raise DataUnavailable(
             "Add OPENAQ_API_KEY to the server .env file, then restart the API to connect live observations."
@@ -182,28 +223,14 @@ def collect(location):
         with httpx.Client(
             timeout=provider_timeout(), headers={"X-API-Key": key}
         ) as client:
-            payload = request(
-                client,
-                f"{BASE}/locations",
-                params={
-                    "coordinates": f"{location.latitude},{location.longitude}",
-                    "radius": 25000,
-                    "limit": 1000,
-                },
-            )
             locations = sorted(
-                payload.get("results") or [],
+                discover_locations(client, location),
                 key=lambda loc: ((loc.get("datetimeLast") or {}).get("utc") or ""),
                 reverse=True,
             )
-            # Prioritize paired PM stations before limiting requests; old IDs are
-            # often retired stations and must not crowd out active monitors.
-            locations.sort(
-                key=lambda loc: not {"pm25", "pm10"}.issubset(
-                    {parameter(s) for s in loc.get("sensors", [])}
-                )
-            )
-            for loc in locations[:8]:
+            # Keep recency first: stale paired monitors must not hide fresh
+            # single-pollutant stations. Bound requests to protect API quota.
+            for loc in locations[:16]:
                 sensors = {
                     s["id"]: parameter(s)
                     for s in loc.get("sensors", [])
@@ -211,11 +238,14 @@ def collect(location):
                 }
                 if not sensors:
                     continue
-                latest = request(
-                    client,
-                    f"{BASE}/locations/{loc['id']}/latest",
-                    params={"limit": 100},
-                )
+                last_seen = (loc.get("datetimeLast") or {}).get("utc")
+                if last_seen and (pd.Timestamp(now)-pd.Timestamp(last_seen)).total_seconds() > 86400:
+                    latest = {"results": []}
+                else:
+                    try:
+                        latest = request(client, f"{BASE}/locations/{loc['id']}/latest", params={"limit": 100})
+                    except DataUnavailable as exc:
+                        raise DataUnavailable(str(exc), stations=stations) from None
                 readings = {}
                 for item in latest.get("results") or []:
                     name = sensors.get(item.get("sensorsId"))
@@ -223,7 +253,10 @@ def collect(location):
                     if name and stamp and valid_value(item.get("value")):
                         ts = pd.Timestamp(stamp)
                         age = (pd.Timestamp(now) - ts).total_seconds() / 3600
-                        if -0.25 <= age <= 24:
+                        if -0.25 <= age <= 24 and (
+                            name not in readings
+                            or ts > pd.Timestamp(readings[name]["observed_at"])
+                        ):
                             readings[name] = {
                                 "value": item["value"],
                                 "observed_at": stamp,
@@ -235,6 +268,7 @@ def collect(location):
                     {
                         "id": loc["id"],
                         "name": loc["name"],
+                        "distance_km": loc["distance_km"],
                         "latitude": coords.get("latitude"),
                         "longitude": coords.get("longitude"),
                         "provider": (loc.get("provider") or {}).get(
@@ -249,22 +283,27 @@ def collect(location):
             ]
             if not candidates:
                 raise DataUnavailable(
-                    "No station within 25 km has both PM2.5 and PM10 measurements from the last 24 hours. Coverage varies by city; try another location or the explicit demo."
+                    "OpenAQ is connected, but no checked station within 125 km has both pollutants updated in the last 24 hours. The paired station forecast is unavailable; independent sources are required.",
+                    stations=stations,
                 )
             selected = min(
                 candidates,
-                key=lambda s: max(r["age_hours"] for r in s["readings"].values()),
+                key=lambda s: (s["distance_km"], max(r["age_hours"] for r in s["readings"].values())),
             )
             selected["selected"] = True
-            columns = {
-                p: sensor_hours(
-                    client, selected["readings"][p]["sensor_id"], start, now
-                )
-                for p in ("pm25", "pm10")
-            }
+            try:
+                columns = {
+                    p: sensor_hours(client, selected["readings"][p]["sensor_id"], start, now)
+                    for p in ("pm25", "pm10")
+                }
+            except DataUnavailable as exc:
+                raise DataUnavailable(str(exc), stations=stations) from None
         # Do not send the OpenAQ credential to the weather provider.
         with httpx.Client(timeout=provider_timeout()) as weather_client:
-            meteo = weather(weather_client, location, start, now)
+            try:
+                meteo = weather(weather_client, location, start, now)
+            except DataUnavailable as exc:
+                raise DataUnavailable(str(exc), stations=stations) from None
         frame = pd.DataFrame(columns).sort_index()
         frame = frame.reindex(
             pd.date_range(
@@ -277,12 +316,12 @@ def collect(location):
         complete = frame.dropna()
         if len(complete) < 2:
             raise DataUnavailable(
-                "Not enough aligned PM2.5, PM10 and weather observations at this station."
+                "Not enough aligned PM2.5, PM10 and weather observations at this station.", stations=stations
             )
         last = complete.timestamp.max()
         if (pd.Timestamp(now) - last).total_seconds() > 24 * 3600:
             raise DataUnavailable(
-                "The most recent complete hourly observation is older than 24 hours. No current forecast is available."
+                "The most recent complete hourly observation is older than 24 hours. No current forecast is available.", stations=stations
             )
         frame = frame[frame.timestamp <= last].reset_index(drop=True)
         result = {
@@ -294,7 +333,7 @@ def collect(location):
             "coverage_pct": round(100 * len(complete) / len(frame), 1),
             "collected_at": now.isoformat(),
             "warnings": [
-                "Station readings represent their monitoring location, not a city-wide average.",
+                f"Selected station is {selected['distance_km']} km from the city centre. Readings represent that monitor, not a city-wide average.",
                 "Weather is Open-Meteo reanalysis/model data. Missing hours are excluded; synthetic observations are never inserted.",
             ],
         }
