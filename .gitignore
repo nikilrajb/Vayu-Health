@@ -1,4 +1,7 @@
 # Python
+.venv/
+*.log
+
 __pycache__/
 *.py[cod]
 *$py.class

@@ -16,6 +16,18 @@ class Settings(BaseSettings):
 
     openaq_api_key: str = ""
     airnow_api_key: str = ""
+    notifications_enabled: bool = False
+    alert_cities: str = "mumbai,bangalore"
+    alert_email_to: str = ""
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_from: str = ""
+    alert_sms_to: str = ""
     provider_connect_timeout_seconds: float = Field(default=8, ge=1, le=60)
     provider_read_timeout_seconds: float = Field(default=25, ge=1, le=120)
     provider_retries: int = Field(default=1, ge=0, le=2)

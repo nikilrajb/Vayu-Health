@@ -28,7 +28,8 @@ def synthesize_city(
     city_id: str, hours: int = HOURS, end: datetime | None = None
 ) -> pd.DataFrame:
     loc = CITIES[city_id]
-    climate = CITY_CLIMATE[city_id]
+    # Explicit demo defaults only; these are never used by live collection.
+    climate = CITY_CLIMATE.get(city_id, CITY_CLIMATE["delhi"])
     end = end or datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
     index = pd.date_range(end=end, periods=hours, freq="h", tz="UTC")
     rng = _rng(city_id)

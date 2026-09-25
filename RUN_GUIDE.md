@@ -32,7 +32,7 @@ Use this mode when changing the code. The examples use **API port 8002** to avoi
 
 ```powershell
 Set-Location 'C:\Users\nikin\OneDrive\Documents\Hackathon\Vayu\Vayu-Health'
-./.venv/Scripts/python.exe -m uvicorn app.main:app --app-dir backend --reload --host 127.0.0.1 --port 8002
+./.venv/Scripts/python.exe -m uvicorn app.main:app --app-dir backend --reload --reload-dir backend/app --host 127.0.0.1 --port 8002
 ```
 
 **Terminal B — website**
@@ -197,3 +197,28 @@ Sources: [OpenAQ authentication](https://docs.openaq.org/using-the-api/api-key),
 | Live values do not change immediately | Successful collection is cached for ten minutes. The observation time is the provider's time, not the last Refresh click. |
 
 To stop development mode, press **Ctrl+C in both terminals**. To stop the one-terminal production-style run, press **Ctrl+C in that terminal**.
+# Quick start on this configured computer
+
+**New operational workflow:** see [IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md)
+for direct AirNow ingestion, the opt-in `run-monitor.cmd` collector, persistent
+alert acknowledgements and the budget-constrained scenario planner.
+
+The live pipeline now supports 42 Indian cities and explicitly labelled CAMS
+regional forecasts when station coverage is incomplete. Read
+[RESILIENT_FORECASTING.md](docs/RESILIENT_FORECASTING.md) for model selection,
+source labels, saved data, operational response and remaining validation work.
+
+Double-click `run-vayu.cmd` in the project folder. It opens separate backend
+(port 8002) and frontend (port 5173) terminal windows. Once both report that they
+are ready, open http://127.0.0.1:5173 and select **Live data**. Keep both windows
+open. Stop them with Ctrl+C before launching again. These launchers use the
+existing `.venv`, `frontend/node_modules`, and `.env`; they do not replace your key.
+
+If live data fails, double-click `check-live-data.cmd`. Wait for its report and
+share the output, which omits your API key. A successful OpenAQ check establishes
+authentication and connectivity; station availability and usable training history
+are checked separately by the application. Never share `.env` itself.
+
+For separate starts, use `run-backend.cmd` and `run-frontend.cmd`. Frontend source
+edits refresh automatically, and backend Python edits restart the development
+server. After editing `.env`, restart the backend manually.

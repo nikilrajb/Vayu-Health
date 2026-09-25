@@ -20,7 +20,8 @@ export type ForecastHour = {
   pm10_upper: number | null;
 };
 export type Station = {
-  id: number;
+  distance_km?: number;
+  id: number | string;
   name: string;
   latitude: number | null;
   longitude: number | null;
@@ -28,11 +29,32 @@ export type Station = {
   selected: boolean;
   readings: Record<
     string,
-    { value: number; observed_at: string; age_hours: number; sensor_id: number }
+    { value: number; observed_at: string; age_hours: number; sensor_id: number | string }
   >;
 };
 type Score = { mae: number; rmse: number; r2: number };
 export type Snapshot = {
+  response_plan?: { step: string; detail: string }[];
+  quality?: string;
+  provenance?: Record<
+    string,
+    {
+      current_kind: string;
+      distance_km?: number | null;
+      current_at: string;
+      current_source: string;
+      forecast_method: string;
+      station: string | null;
+      metrics: null | {
+        model: Score;
+        persistence: Score;
+        train_rows: number;
+        calibration_rows: number;
+        test_rows: number;
+        purge_hours: number;
+      };
+    }
+  > | null;
   location: Location;
   observed_at: string;
   collected_at: string;
